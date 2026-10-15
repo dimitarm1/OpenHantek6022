@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
+#include <cmath>
 
 #include <list>
 #include <memory>
@@ -84,8 +85,19 @@ class GlScope : public QOpenGLWidget {
     QPointF posToScopePos( QPointF pos );
     void rightMouseEvent( QMouseEvent *event );
 
+  public:
+    /// History view: show the rendered data shifted to \p targetAge (NaN: no shift)
+    void setViewTargetAge( double targetAge ) {
+        viewTargetAge = targetAge;
+        update();
+    }
+
+  protected:
+
   signals:
     void markerMoved( int cursorIndex, int marker );
+    void viewDragged( double divisions ); ///< middle mouse drag: horizontal movement in screen divisions
+    void viewDragFinished();
     void cursorMeasurement( QPointF measurePosition = QPointF(), QPoint globalPosition = QPoint(), bool status = false );
 
   private:
@@ -111,6 +123,10 @@ class GlScope : public QOpenGLWidget {
     std::vector< DsoSettingsScopeCursor * > cursorInfo;
     int selectedCursor = 0;
     bool rightMouseInside = false;
+    bool middleDragging = false;
+    double renderedAge = std::nan( "" ); ///< history: age of the right edge of the last data
+    double viewTargetAge = std::nan( "" ); ///< history: wanted age while dragging, NaN = as rendered
+    int middleLastX = 0;
 
     // Grid
     QOpenGLBuffer m_grid;

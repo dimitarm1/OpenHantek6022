@@ -391,8 +391,39 @@ MainWindow::MainWindow( HantekDsoControl *dsoControl, DsoSettings *settings, Exp
     historySlider->setVisible( false );
     historyLabel->setVisible( false );
     connect( historySlider, &QSlider::valueChanged, this, [ this ]( int index ) {
-        historyLabel->setText( tr( "%1 s" ).arg( -historySource->historyAgeMs( index ) / 1000.0, 0, 'f', 1 ) );
+        historyTargetAge = std::nan( "" );
+        dsoWidget->setViewTargetAge( historyTargetAge );
+        ++historySerial;
         QMetaObject::invokeMethod( historySource, "showHistoryFrame", Qt::QueuedConnection, Q_ARG( int, index ) );
+    } );
+    // middle mouse drag: the already rendered three screens wide graph is only shifted by OpenGL,
+    // the exact position is rendered in the background when the margin is used up or the drag ends
+    connect( dsoWidget, &DsoWidget::viewDragged, this, [ this ]( double divisions ) {
+        if ( !historySlider->isVisible() )
+            return;
+        if ( !historyRendered ) { // still the live frame: first render the history window, then drag
+            requestHistoryAge( historyAge );
+            return;
+        }
+        const double timebase = dsoSettings->scope.horizontal.timebase;
+        if ( std::isnan( historyTargetAge ) )
+            historyTargetAge = historyAge;
+        historyDragging = true;
+        historyTargetAge = std::max( 0.0, std::min( historyTargetAge + divisions * timebase, historySource->historySpanSeconds() ) );
+        dsoWidget->setViewTargetAge( historyTargetAge );
+        if ( fabs( historyTargetAge - historyAge ) > 0.6 * DIVS_TIME * timebase && historyRenderTimer.elapsed() > 150 )
+            requestHistoryAge( historyTargetAge );
+    } );
+    connect( dsoWidget, &DsoWidget::viewDragFinished, this, [ this ]() {
+        historyDragging = false;
+        if ( !std::isnan( historyTargetAge ) )
+            requestHistoryAge( historyTargetAge );
+    } );
+    connect( dsoControl, &HantekDsoControl::historyPositionChanged, this, [ this ]( int index, double ageSeconds ) {
+        historyAge = ageSeconds;
+        QSignalBlocker sliderBlocker( historySlider );
+        historySlider->setValue( index );
+        historyLabel->setText( tr( "%1 s" ).arg( -ageSeconds, 0, 'f', 1 ) );
     } );
     connect( dsoControl, &HantekDsoControl::showSamplingStatus, this, [ this ]( bool enabled ) {
         updateHistoryControls( enabled );
@@ -577,6 +608,18 @@ void MainWindow::showNewData( std::shared_ptr< PPresult > newData ) {
     if ( dsoSettings->scope.verboseLevel > 5 )
         qDebug() << "     MainWindow::showNewData()" << newData->tag;
     dsoWidget->showNew( newData );
+    historyRendered = newData->extendedView;
+    if ( !std::isnan( historyTargetAge ) && !historyDragging && newData->viewSerial >= historySerial ) {
+        historyTargetAge = std::nan( "" ); // the requested position is rendered, no more panning needed
+        dsoWidget->setViewTargetAge( historyTargetAge );
+    }
+}
+
+
+void MainWindow::requestHistoryAge( double ageSeconds ) {
+    historyRenderTimer.restart();
+    QMetaObject::invokeMethod( historySource, "showHistoryAtAge", Qt::QueuedConnection, Q_ARG( double, ageSeconds ),
+                               Q_ARG( int, ++historySerial ) );
 }
 
 

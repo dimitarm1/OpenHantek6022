@@ -845,6 +845,10 @@ void HantekDsoControl::convertRawDataToSamples() {
     QWriteLocker resultLocker( &result.lock );
     result.freeRunning = freeRunning;
     result.tag = raw.tag;
+    if ( !summed ) {
+        result.extendedView = false; // live data
+        result.viewAge = -1;
+    }
     result.samplerate = raw.samplerate / raw.oversampling;
     // Prepare result buffers
     result.data.resize( specification->channels + 1 ); // CH0, CH1, MATH
@@ -974,7 +978,7 @@ void HantekDsoControl::clearHistory() {
     QMutexLocker locker( &historyMutex );
     history.clear();
     historyBytes = 0;
-    replayIndex = -1;
+    replayAge = -1;
 }
 
 
@@ -1048,27 +1052,82 @@ qint64 HantekDsoControl::historyAgeMs( int index ) const {
 }
 
 
+double HantekDsoControl::historySpanSeconds() const {
+    QMutexLocker locker( &historyMutex );
+    double span = 0;
+    for ( const auto &f : history )
+        span += double( f->sums.size() / f->channels ) / ( f->samplerate / f->oversampling );
+    return span;
+}
+
+
+/// Age (seconds before the newest data) of the end of every history frame, assuming gapless frames.
+/// Entry [ history.size() ] holds the age of the oldest data. historyMutex must be locked.
+std::vector< double > HantekDsoControl::historyEndAges() const {
+    std::vector< double > ages( history.size() + 1, 0.0 );
+    double age = 0;
+    for ( size_t iii = history.size(); iii-- > 0; ) {
+        ages[ iii ] = age;
+        age += double( history[ iii ]->sums.size() / history[ iii ]->channels ) / ( history[ iii ]->samplerate / history[ iii ]->oversampling );
+    }
+    ages[ history.size() ] = age;
+    return ages;
+}
+
+
 void HantekDsoControl::showHistoryFrame( int index ) {
-    if ( samplingUI || scope->liveCalibrationActive )
-        return; // only while stopped
-    // Build a window that ends with history frame \p index and is long enough for the current timebase:
-    // walk back over directly consecutive frames of the gapless stream and join them.
-    std::shared_ptr< RawFrame > frame;
-    std::vector< std::shared_ptr< RawFrame > > chain; // newest first
+    double age;
     {
         QMutexLocker locker( &historyMutex );
         if ( index < 0 || size_t( index ) >= history.size() )
             return;
-        replayIndex = index;
-        frame = history[ size_t( index ) ];
-        // samples per channel needed: twice the screen width for trigger search, but at least like a live block
-        const double duration = controlsettings.samplerate.target.duration;
-        const double effectiveRate = frame->samplerate / frame->oversampling;
-        const size_t need = size_t( std::min( std::max( 2.0 * duration * effectiveRate + 200, double( SAMPLESIZE + 500 ) ), 16e6 ) );
+        age = historyEndAges()[ size_t( index ) ];
+    }
+    replayHistory( age, ++replaySerial );
+}
+
+
+void HantekDsoControl::showHistoryAtAge( double ageSeconds, int serial ) {
+    replaySerial = serial;
+    replayHistory( ageSeconds, serial );
+}
+
+
+/// Show the part of the history whose right screen edge is \p ageSeconds before the newest data.
+/// The data window is three screens wide (the visible screen is in the middle), so the view can be panned without delay.
+void HantekDsoControl::replayHistory( double ageSeconds, int serial ) {
+    if ( samplingUI || scope->liveCalibrationActive )
+        return; // only while stopped
+    const double screenTime = DIVS_TIME * scope->horizontal.timebase;
+    std::shared_ptr< RawFrame > frame;
+    std::vector< std::shared_ptr< RawFrame > > chain; // newest first
+    size_t trim = 0;                                  // samples before the end of the newest frame of the chain
+    double endAgeData = 0, rightAge = 0, rate = 0;
+    unsigned dots = 0;
+    int leftSample = 0;
+    int sliderIndex = 0;
+    {
+        QMutexLocker locker( &historyMutex );
+        if ( history.empty() )
+            return;
+        const std::vector< double > endAges = historyEndAges();
+        const double total = endAges.back();
+        ageSeconds = std::max( 0.0, std::min( ageSeconds, total - screenTime ) );
+        endAgeData = std::max( 0.0, ageSeconds - screenTime ); // one screen of margin on the right
+        // frame that contains the end of the data window
+        size_t e = 0; // endAges decreases with the index: take the oldest frame that ends not later than endAgeData
+        while ( e + 1 < history.size() && endAges[ e ] > endAgeData )
+            ++e;
+        frame = history[ e ];
+        rate = frame->samplerate / frame->oversampling;
+        const size_t frameLength = frame->sums.size() / frame->channels;
+        trim = size_t( std::max( 0.0, std::min( ( endAgeData - endAges[ e ] ) * rate, double( frameLength - 1 ) ) ) );
+        // walk back over consecutive compatible frames until the window is 3 screens wide
+        const size_t need = size_t( std::min( std::max( 3.0 * screenTime * rate + 200, double( SAMPLESIZE + 500 ) ), 16e6 ) );
         chain.push_back( frame );
-        size_t have = frame->sums.size() / frame->channels;
-        for ( int idx = index; have < need && idx > 0 && history[ size_t( idx ) ]->continued; --idx ) {
-            const auto &prev = history[ size_t( idx - 1 ) ];
+        size_t have = frameLength - trim;
+        for ( size_t idx = e; have < need && idx > 0 && history[ idx ]->continued; --idx ) {
+            const auto &prev = history[ idx - 1 ];
             if ( prev->channels != frame->channels || prev->samplerate != frame->samplerate ||
                  prev->oversampling != frame->oversampling || prev->gainIndex[ 0 ] != frame->gainIndex[ 0 ] ||
                  prev->gainIndex[ 1 ] != frame->gainIndex[ 1 ] )
@@ -1076,6 +1135,20 @@ void HantekDsoControl::showHistoryFrame( int index ) {
             chain.push_back( prev );
             have += prev->sums.size() / prev->channels;
         }
+        dots = unsigned( ceil( screenTime * rate ) );
+        const double rightSample = double( have ) - ( ageSeconds - endAgeData ) * rate; // right screen edge in the joined data
+        leftSample = int( floor( rightSample ) ) - int( dots );
+        if ( leftSample < 0 ) { // not enough older data in the joined window: show it from its start
+            rightAge = ageSeconds + double( leftSample ) / rate;
+            leftSample = 0;
+        } else {
+            rightAge = ageSeconds;
+        }
+        // slider index = frame that contains the right edge
+        size_t k = 0;
+        while ( k + 1 < history.size() && endAges[ k ] > rightAge )
+            ++k;
+        sliderIndex = int( k );
     }
     std::vector< uint16_t > joined;
     unsigned char clippedMask = 0;
@@ -1083,6 +1156,8 @@ void HantekDsoControl::showHistoryFrame( int index ) {
         joined.insert( joined.end(), chain[ iii ]->sums.begin(), chain[ iii ]->sums.end() );
         clippedMask |= chain[ iii ]->clippedMask;
     }
+    joined.resize( joined.size() - trim * frame->channels ); // window ends before the end of the newest frame
+    replayAge = rightAge;
     // temporarily load it into raw ...
     Raw backup;
     {
@@ -1119,31 +1194,35 @@ void HantekDsoControl::showHistoryFrame( int index ) {
     mathChannel->calculate( result );
     {
         QWriteLocker resultLocker( &result.lock );
-        if ( !result.freeRunning ) {
-            triggering->searchTriggeredPosition( result );
-            result.liveTrigger = result.triggeredPosition != 0;
-        } else {
-            result.liveTrigger = false;
-            result.triggeredPosition = 0;
-        }
+        // no trigger alignment in the history: the screen starts exactly at \c leftSample
+        const unsigned preTrig = unsigned( scope->trigger.position * dots );
+        result.liveTrigger = false;
+        result.triggeredPosition = leftSample + int( preTrig ) + 1;
+        result.pulseWidth1 = result.pulseWidth2 = 0.0;
+        result.extendedView = true;
+        result.viewAge = rightAge;
+        result.viewSerial = serial;
     }
     emit samplesAvailable( &result );
     // ... and restore the live state
-    QWriteLocker rawLocker( &raw.lock );
-    raw.channels = backup.channels;
-    raw.samplerate = backup.samplerate;
-    raw.oversampling = backup.oversampling;
-    std::copy( backup.gainValue, backup.gainValue + 2, raw.gainValue );
-    std::copy( backup.gainIndex, backup.gainIndex + 2, raw.gainIndex );
-    raw.tag = backup.tag;
-    raw.freeRun = backup.freeRun;
-    raw.valid = backup.valid;
-    raw.rollMode = backup.rollMode;
-    raw.size = backup.size;
-    raw.received = backup.received;
-    raw.data.swap( backup.data );
-    raw.sums.swap( backup.sums );
-    raw.clippedMask = backup.clippedMask;
+    {
+        QWriteLocker rawLocker( &raw.lock );
+        raw.channels = backup.channels;
+        raw.samplerate = backup.samplerate;
+        raw.oversampling = backup.oversampling;
+        std::copy( backup.gainValue, backup.gainValue + 2, raw.gainValue );
+        std::copy( backup.gainIndex, backup.gainIndex + 2, raw.gainIndex );
+        raw.tag = backup.tag;
+        raw.freeRun = backup.freeRun;
+        raw.valid = backup.valid;
+        raw.rollMode = backup.rollMode;
+        raw.size = backup.size;
+        raw.received = backup.received;
+        raw.data.swap( backup.data );
+        raw.sums.swap( backup.sums );
+        raw.clippedMask = backup.clippedMask;
+    }
+    emit historyPositionChanged( sliderIndex, rightAge );
 }
 
 
@@ -1157,9 +1236,9 @@ void HantekDsoControl::stateMachine() {
     // we have a sample available ...
     // ... that is either a new sample or we are in free run mode or a new trigger search is needed
     static unsigned lastTag = UINT32_MAX; // detect new raw data
-    if ( !samplingUI && replayIndex >= 0 ) { // stopped and browsing the history: settings changes redraw the history window
+    if ( !samplingUI && replayAge >= 0 ) { // stopped and browsing the history: settings changes redraw the history window
         if ( refreshNeeded() )
-            showHistoryFrame( replayIndex );
+            replayHistory( replayAge, replaySerial );
     } else if ( samplingStarted && raw.valid && ( raw.tag != lastTag || raw.freeRun || refreshNeeded() ) ) {
         lastTag = raw.tag;
         convertRawDataToSamples(); // process samples, apply gain settings etc.

@@ -146,6 +146,13 @@ void GlScope::mousePressEvent( QMouseEvent *event ) {
     QPointF position = posToScopePos( event->pos() );
     if ( scope->verboseLevel > 3 )
         qDebug() << "   GLS::mPE()" << event;
+    if ( event->button() == Qt::MiddleButton ) { // drag the history view
+        middleDragging = true;
+        middleLastX = event->pos().x();
+        QGuiApplication::setOverrideCursor( Qt::SizeHorCursor );
+        event->accept();
+        return;
+    }
     if ( !( zoomed && selectedCursor == 0 ) && event->button() == Qt::LeftButton ) {
         selectedMarker = NO_MARKER;
         DsoSettingsScopeCursor *cursor = cursorInfo[ size_t( selectedCursor ) ];
@@ -201,6 +208,13 @@ void GlScope::mouseMoveEvent( QMouseEvent *event ) {
     QPointF position = posToScopePos( event->pos() );
     if ( scope->verboseLevel > 3 )
         qDebug() << "   GLS::mME()" << event << position;
+    if ( middleDragging ) {
+        if ( width() > 0 )
+            emit viewDragged( double( event->pos().x() - middleLastX ) / width() * DIVS_TIME );
+        middleLastX = event->pos().x();
+        event->accept();
+        return;
+    }
     if ( !( zoomed && selectedCursor == 0 ) && ( event->buttons() & Qt::LeftButton ) != 0 ) {
         if ( selectedMarker == NO_MARKER ) {
             // qDebug() << "mouseMoveEvent";
@@ -224,6 +238,13 @@ void GlScope::mouseMoveEvent( QMouseEvent *event ) {
 void GlScope::mouseReleaseEvent( QMouseEvent *event ) {
     if ( scope->verboseLevel > 3 )
         qDebug() << "   GLS::mRE()" << event;
+    if ( middleDragging && event->button() == Qt::MiddleButton ) {
+        middleDragging = false;
+        QGuiApplication::restoreOverrideCursor();
+        emit viewDragFinished();
+        event->accept();
+        return;
+    }
     if ( !( zoomed && selectedCursor == 0 ) && event->button() == Qt::LeftButton ) {
         QPointF position = posToScopePos( event->pos() );
         if ( selectedMarker < 2 ) {
@@ -501,6 +522,7 @@ void GlScope::showData( std::shared_ptr< PPresult > newData ) {
 
     // Add new entry
     m_GraphHistory.front().writeData( newData.get(), m_program.get(), vertexLocation );
+    renderedAge = newData->viewAge >= 0 ? newData->viewAge : std::nan( "" );
     // doneCurrent();
 
     update();
@@ -590,6 +612,16 @@ void GlScope::paintGL() {
 
     drawMarkers();
 
+    // History view: pan the (three screens wide) graphs by the difference between wanted and rendered position
+    QMatrix4x4 graphMatrix = pmvMatrix;
+    if ( zoomed ) {
+        graphMatrix.scale( QVector3D( GLfloat( DIVS_TIME ) / GLfloat( fabs( scope->getMarker( 1 ) - scope->getMarker( 0 ) ) ), 1.0f, 1.0f ) );
+        graphMatrix.translate( -GLfloat( scope->getMarker( 0 ) + scope->getMarker( 1 ) ) / 2, 0.0f, 0.0f );
+    }
+    if ( !std::isnan( viewTargetAge ) && !std::isnan( renderedAge ) && scope->horizontal.timebase > 0 )
+        graphMatrix.translate( GLfloat( ( viewTargetAge - renderedAge ) / scope->horizontal.timebase ), 0.0f, 0.0f );
+    m_program->setUniformValue( matrixLocation, graphMatrix );
+
     unsigned historyIndex = 0;
     for ( Graph &graph : m_GraphHistory ) {
         for ( ChannelID channel = 0; channel < scope->voltage.size(); ++channel ) {
@@ -604,9 +636,7 @@ void GlScope::paintGL() {
         ++historyIndex;
     }
 
-    if ( zoomed ) {
-        m_program->setUniformValue( matrixLocation, pmvMatrix );
-    }
+    m_program->setUniformValue( matrixLocation, pmvMatrix );
 
     drawGrid();
     m_program->release();

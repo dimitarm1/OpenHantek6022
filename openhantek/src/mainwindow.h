@@ -6,6 +6,7 @@
 #include <QLineEdit>
 #include <QList>
 #include <QMainWindow>
+#include <cmath>
 #include <memory>
 
 #include "scopesettings.h"
@@ -55,6 +56,13 @@ class MainWindow : public QMainWindow {
     QSlider *historySlider = nullptr;
     QLabel *historyLabel = nullptr;
     void updateHistoryControls( bool samplingActive );
+    void requestHistoryAge( double ageSeconds ); ///< ask the control thread to render the history screen at that age
+    double historyAge = 0;                       ///< age of the right edge of the rendered history screen
+    double historyTargetAge = std::nan( "" );    ///< wanted age while dragging (NaN: as rendered)
+    bool historyDragging = false;
+    bool historyRendered = false;                ///< the display shows data from the history window
+    int historySerial = 0;                       ///< number of the last request
+    QElapsedTimer historyRenderTimer;
 
     Ui::MainWindow *ui;
     QIcon iconPause;

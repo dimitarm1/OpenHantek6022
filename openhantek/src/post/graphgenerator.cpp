@@ -92,6 +92,9 @@ void GraphGenerator::generateGraphsTYvoltage( PPresult *result ) {
         int leftmostSample = int( result->triggeredPosition );
         if ( leftmostSample )                     // adjust position if triggered, else start from sample[0]
             leftmostSample -= preTrigSamples + 1; // shift samples to show a stable trace
+        // history view: generate one more screen on each side, the display can be panned without a new calculation
+        unsigned ext = ( result->extendedView && !scope->histogram ) ? dotsOnScreen : 0;
+        leftmostSample -= int( ext );
         int leftmostPosition = 0;                 // start position on display
         if ( leftmostSample < 0 ) {               // trig pos or time/div was increased
             leftmostPosition = -leftmostSample;   // trace can't start on left margin
@@ -101,7 +104,8 @@ void GraphGenerator::generateGraphsTYvoltage( PPresult *result ) {
         const unsigned binsPerDiv = 50; // resolution of histogram
 
         // Set size directly to avoid reallocations (n+1 dots to display n lines)
-        graphVoltage.reserve( ++dotsOnScreen * ( interpolationStep ? 2 : 1 ) ); // two dots per "Step"
+        dotsOnScreen += 2 * ext + 1;                                           // visible screen plus margins
+        graphVoltage.reserve( dotsOnScreen * ( interpolationStep ? 2 : 1 ) ); // two dots per "Step"
         graphHistogram.reserve( int( 2 * ( binsPerDiv * DIVS_VOLTAGE ) ) );
 
         const double gain = scope->gain( channel );
@@ -116,7 +120,8 @@ void GraphGenerator::generateGraphsTYvoltage( PPresult *result ) {
             // we would need sincWidth, but we take what we get
             const unsigned int left = std::min( sincWidth, unsigned( leftmostSample ) );
             horizontalFactor /= oversample;                                     // distance between (resampled) dots
-            dotsOnScreen = unsigned( DIVS_TIME / horizontalFactor + 0.99 + 1 ); // dot count after resample
+            ext *= oversample;
+            dotsOnScreen = unsigned( DIVS_TIME / horizontalFactor + 0.99 + 1 ) + 2 * ext; // dot count after resample
             const unsigned int resampleSize = ( left + dotsOnScreen + sincWidth ) * oversample;
             resample.clear();                // invalidate old content
             resample.resize( resampleSize ); //  ... and init with zero because we accumulate the convolution
@@ -145,7 +150,7 @@ void GraphGenerator::generateGraphsTYvoltage( PPresult *result ) {
         unsigned bins[ int( binsPerDiv * DIVS_VOLTAGE ) ] = { 0 };
         for ( unsigned int position = unsigned( leftmostPosition ); position < dotsOnScreen && sampleIterator < sampleEnd - 1;
               ++position ) {
-            double x = double( MARGIN_LEFT + position * horizontalFactor );
+            double x = double( MARGIN_LEFT + ( double( position ) - double( ext ) ) * horizontalFactor );
             double y_1 = *sampleIterator++ / gain + offset;
             double y = *sampleIterator / gain + offset;
             if ( !scope->histogram ) { // show complete trace

@@ -19,6 +19,9 @@ struct DSOsamples {
     Unit mathVoltageUnit = UNIT_VOLTS;         ///< unless UNIT_VOLTSQUARE for some math functions
     bool freeRunning = false;                  ///< trigger: NONE, half sample count
     unsigned tag = 0;                          ///< track individual sample blocks (debug support)
+    bool extendedView = false;                 ///< history replay: data is 3 screens wide, the middle one is shown
+    double viewAge = -1;                       ///< history replay: age of the right screen edge
+    int viewSerial = 0;                        ///< history replay: request number
     mutable QReadWriteLock lock;
 };
 

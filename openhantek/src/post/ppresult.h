@@ -61,6 +61,9 @@ class PPresult {
     double pulseWidth1 = 0.0;  ///< The width of the triggered pulse
     double pulseWidth2 = 0.0;  ///< The width of the following pulse
     unsigned tag;              ///< track individual sample blocks (debug support)
+    bool extendedView = false; ///< history replay: graph is 3 screens wide, the middle one is the visible screen
+    double viewAge = -1;       ///< history replay: age of the right screen edge
+    int viewSerial = 0;        ///< history replay: request number
 
     ChannelsGraphs vaChannelSpectrum;
     ChannelsGraphs vaChannelVoltage;

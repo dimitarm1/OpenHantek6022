@@ -239,7 +239,10 @@ class HantekDsoControl : public QObject {
     size_t historyBytes = 0;
     mutable QMutex historyMutex;
     QElapsedTimer historyClock;
-    int replayIndex = -1; ///< history frame shown while stopped, -1 = none
+    double replayAge = -1; ///< age of the right screen edge shown while stopped, < 0 = none
+    int replaySerial = 0;  ///< request number of the last history request (comes back with the result)
+    void replayHistory( double ageSeconds, int serial );
+    std::vector< double > historyEndAges() const;
     void clearHistory();
     unsigned debugLevel = 0;
     uint8_t channelOffset[ 2 ] = { 0x80, 0x80 };
@@ -356,10 +359,14 @@ class HantekDsoControl : public QObject {
     int historySize() const;
     /// \brief Age of frame \p index relative to the newest frame in ms (thread safe)
     qint64 historyAgeMs( int index ) const;
+    /// \brief Time covered by the history in seconds (thread safe)
+    double historySpanSeconds() const;
 
   public slots:
     /// \brief While stopped: process and show the history frame \p index
     void showHistoryFrame( int index );
+    /// \brief While stopped: show the history screen whose right edge is \p ageSeconds before the newest data
+    void showHistoryAtAge( double ageSeconds, int serial );
 
   signals:
     void showSamplingStatus( bool enabled );                   ///< The oscilloscope started/stopped sampling/waiting for trigger
@@ -378,6 +385,9 @@ class HantekDsoControl : public QObject {
     void deviceAvailabilityChanged( bool available );
 
     void liveCalibrationError() const; // live calibration stopped due to noise or big offset
+
+    /// The history window was moved (slider index, seconds before the newest data)
+    void historyPositionChanged( int index, double ageSeconds );
 };
 
 Q_DECLARE_METATYPE( DSOsamples * )

@@ -24,6 +24,11 @@ class DsoWidget : public QWidget {
     Q_OBJECT
 
   public:
+    /// History view: show the data shifted to the wanted age (NaN: no shift)
+    void setViewTargetAge( double targetAge ) {
+        mainScope->setViewTargetAge( targetAge );
+        zoomScope->setViewTargetAge( targetAge );
+    }
     struct Sliders {
         LevelSlider *voltageOffsetSlider;   ///< The sliders for the graph offsets
         LevelSlider *triggerPositionSlider; ///< The slider for the pretrigger
@@ -156,6 +161,7 @@ class DsoWidget : public QWidget {
     void updateCursorGrid( bool enabled );
     void wheelEvent( QWheelEvent *event ) override;
 
+
     // Scope control
     void updateSlidersSettings();
 
@@ -171,4 +177,6 @@ class DsoWidget : public QWidget {
     void voltageOffsetChanged( ChannelID channel, double value ); ///< A graph offset has been changed
     void triggerPositionChanged( double value );                  ///< The pretrigger has been changed
     void triggerLevelChanged( ChannelID channel, double value );  ///< A trigger level has been changed
+    void viewDragged( double divisions );                         ///< The scope was dragged with the middle mouse button
+    void viewDragFinished();
 };
