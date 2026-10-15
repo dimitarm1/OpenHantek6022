@@ -30,6 +30,8 @@
 #include <QPalette>
 #include <QPrintDialog>
 #include <QPrinter>
+#include <QSlider>
+#include <QLabel>
 #include <QTimer>
 #include <QValidator>
 
@@ -377,7 +379,23 @@ MainWindow::MainWindow( HantekDsoControl *dsoControl, DsoSettings *settings, Exp
     connect( spectrumDock, &SpectrumDock::magnitudeChanged, dsoWidget, &DsoWidget::updateSpectrumMagnitude );
 
     // Started/stopped signals from oscilloscope
+    // history slider: browse back up to one minute while the scope is stopped
+    historySource = dsoControl;
+    historySlider = new QSlider( Qt::Horizontal, this );
+    historySlider->setMinimumWidth( 300 );
+    historySlider->setToolTip( tr( "Rewind the stopped waveform (up to one minute)" ) );
+    historyLabel = new QLabel( this );
+    historyLabel->setMinimumWidth( 60 );
+    ui->statusbar->addPermanentWidget( historyLabel );
+    ui->statusbar->addPermanentWidget( historySlider );
+    historySlider->setVisible( false );
+    historyLabel->setVisible( false );
+    connect( historySlider, &QSlider::valueChanged, this, [ this ]( int index ) {
+        historyLabel->setText( tr( "%1 s" ).arg( -historySource->historyAgeMs( index ) / 1000.0, 0, 'f', 1 ) );
+        QMetaObject::invokeMethod( historySource, "showHistoryFrame", Qt::QueuedConnection, Q_ARG( int, index ) );
+    } );
     connect( dsoControl, &HantekDsoControl::showSamplingStatus, this, [ this ]( bool enabled ) {
+        updateHistoryControls( enabled );
         QSignalBlocker blocker( ui->actionSampling );
         if ( enabled ) {
             ui->actionSampling->setIcon( iconPause );
@@ -559,6 +577,20 @@ void MainWindow::showNewData( std::shared_ptr< PPresult > newData ) {
     if ( dsoSettings->scope.verboseLevel > 5 )
         qDebug() << "     MainWindow::showNewData()" << newData->tag;
     dsoWidget->showNew( newData );
+}
+
+
+void MainWindow::updateHistoryControls( bool samplingActive ) {
+    const int count = historySource->historySize();
+    const bool show = !samplingActive && count > 1;
+    if ( show ) {
+        QSignalBlocker sliderBlocker( historySlider );
+        historySlider->setRange( 0, count - 1 );
+        historySlider->setValue( count - 1 );
+        historyLabel->setText( tr( "%1 s" ).arg( 0.0, 0, 'f', 1 ) );
+    }
+    historySlider->setVisible( show );
+    historyLabel->setVisible( show );
 }
 
 

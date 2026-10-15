@@ -27,6 +27,10 @@
 
 #include <QSettings>
 #include <QReadWriteLock>
+#include <QMutex>
+#include <QElapsedTimer>
+#include <deque>
+#include <memory>
 #include <QThread>
 
 class CapturingThread;
@@ -46,6 +50,23 @@ struct Raw {
     unsigned received = 0;
     std::vector< unsigned char > data;
     mutable QReadWriteLock lock;
+};
+
+
+/// One captured raw frame kept in the history ring buffer
+struct RawFrame {
+    unsigned channels = 0;
+    double samplerate = 0;
+    unsigned oversampling = 0;
+    unsigned gainValue[ 2 ] = { 1, 1 };
+    unsigned gainIndex[ 2 ] = { 7, 7 };
+    unsigned tag = 0;
+    bool freeRun = false;
+    bool rollMode = false;
+    unsigned size = 0;
+    unsigned received = 0;
+    qint64 timeMs = 0; ///< capture time stamp
+    std::vector< unsigned char > data;
 };
 
 
@@ -208,6 +229,11 @@ class HantekDsoControl : public QObject {
         return changed;
     }
     Raw raw;
+    std::deque< std::shared_ptr< RawFrame > > history; ///< captured raw frames of the last minute
+    size_t historyBytes = 0;
+    mutable QMutex historyMutex;
+    QElapsedTimer historyClock;
+    void clearHistory();
     unsigned debugLevel = 0;
     uint8_t channelOffset[ 2 ] = { 0x80, 0x80 };
 
@@ -316,6 +342,17 @@ class HantekDsoControl : public QObject {
 
     /// \brief enable/disable offset calibration
     void calibrateOffset( bool enable );
+
+    /// \brief Remember the current raw frame in the history (up to one minute), called from capturing thread
+    void recordRawFrame();
+    /// \brief Number of frames in the history (thread safe)
+    int historySize() const;
+    /// \brief Age of frame \p index relative to the newest frame in ms (thread safe)
+    qint64 historyAgeMs( int index ) const;
+
+  public slots:
+    /// \brief While stopped: process and show the history frame \p index
+    void showHistoryFrame( int index );
 
   signals:
     void showSamplingStatus( bool enabled );                   ///< The oscilloscope started/stopped sampling/waiting for trigger

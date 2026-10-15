@@ -517,6 +517,8 @@ void HantekDsoControl::restartSampling() {
 void HantekDsoControl::enableSamplingUI( bool enabled ) {
     if ( verboseLevel > 3 )
         qDebug() << "   HDC::enableSampling()" << enabled;
+    if ( enabled )
+        clearHistory(); // start recording a new history
     if ( enabled && triggering && controlsettings.trigger.mode == Dso::TriggerMode::SINGLE )
         triggering->resetTriggeredPositionRaw(); // invalidate previous result, wait for new trigger
     else if ( controlsettings.trigger.mode == Dso::TriggerMode::ROLL )
@@ -952,6 +954,130 @@ void HantekDsoControl::updateInterval() {
     displayInterval = 100; // update display at least every 100 ms
 #endif
     acquireInterval = qMin( qMax( sampleInterval, acquireInterval ), 100 ); // at least every 100 ms
+}
+
+
+static const qint64 HISTORY_MAX_AGE_MS = 60 * 1000;
+static const size_t HISTORY_MAX_BYTES = size_t( 300 ) << 20; // limit memory usage
+
+
+void HantekDsoControl::clearHistory() {
+    QMutexLocker locker( &historyMutex );
+    history.clear();
+    historyBytes = 0;
+}
+
+
+/// Called with the freshly received raw frame, no other thread writes \c raw meanwhile.
+void HantekDsoControl::recordRawFrame() {
+    if ( !historyClock.isValid() )
+        historyClock.start();
+    auto frame = std::make_shared< RawFrame >();
+    frame->channels = raw.channels;
+    frame->samplerate = raw.samplerate;
+    frame->oversampling = raw.oversampling;
+    frame->gainValue[ 0 ] = raw.gainValue[ 0 ];
+    frame->gainValue[ 1 ] = raw.gainValue[ 1 ];
+    frame->gainIndex[ 0 ] = raw.gainIndex[ 0 ];
+    frame->gainIndex[ 1 ] = raw.gainIndex[ 1 ];
+    frame->tag = raw.tag;
+    frame->freeRun = raw.freeRun;
+    frame->rollMode = raw.rollMode;
+    frame->size = raw.size;
+    frame->received = raw.received;
+    frame->data = raw.data;
+    frame->timeMs = historyClock.elapsed();
+    QMutexLocker locker( &historyMutex );
+    historyBytes += frame->data.size() + sizeof( RawFrame );
+    history.push_back( frame );
+    while ( history.size() > 1 &&
+            ( frame->timeMs - history.front()->timeMs > HISTORY_MAX_AGE_MS || historyBytes > HISTORY_MAX_BYTES ) ) {
+        historyBytes -= history.front()->data.size() + sizeof( RawFrame );
+        history.pop_front();
+    }
+}
+
+
+int HantekDsoControl::historySize() const {
+    QMutexLocker locker( &historyMutex );
+    return int( history.size() );
+}
+
+
+qint64 HantekDsoControl::historyAgeMs( int index ) const {
+    QMutexLocker locker( &historyMutex );
+    if ( index < 0 || size_t( index ) >= history.size() )
+        return 0;
+    return history.back()->timeMs - history[ size_t( index ) ]->timeMs;
+}
+
+
+void HantekDsoControl::showHistoryFrame( int index ) {
+    if ( samplingUI || scope->liveCalibrationActive )
+        return; // only while stopped
+    std::shared_ptr< RawFrame > frame;
+    {
+        QMutexLocker locker( &historyMutex );
+        if ( index < 0 || size_t( index ) >= history.size() )
+            return;
+        frame = history[ size_t( index ) ];
+    }
+    // temporarily load the stored frame into raw ...
+    Raw backup;
+    {
+        QWriteLocker rawLocker( &raw.lock );
+        backup.channels = raw.channels;
+        backup.samplerate = raw.samplerate;
+        backup.oversampling = raw.oversampling;
+        std::copy( raw.gainValue, raw.gainValue + 2, backup.gainValue );
+        std::copy( raw.gainIndex, raw.gainIndex + 2, backup.gainIndex );
+        backup.tag = raw.tag;
+        backup.freeRun = raw.freeRun;
+        backup.valid = raw.valid;
+        backup.rollMode = raw.rollMode;
+        backup.size = raw.size;
+        backup.received = raw.received;
+        backup.data.swap( raw.data );
+        raw.channels = frame->channels;
+        raw.samplerate = frame->samplerate;
+        raw.oversampling = frame->oversampling;
+        std::copy( frame->gainValue, frame->gainValue + 2, raw.gainValue );
+        std::copy( frame->gainIndex, frame->gainIndex + 2, raw.gainIndex );
+        raw.tag = frame->tag;
+        raw.freeRun = frame->freeRun;
+        raw.rollMode = frame->rollMode;
+        raw.size = frame->size;
+        raw.received = frame->received;
+        raw.data = frame->data;
+    }
+    // ... run the same processing chain as for live data ...
+    convertRawDataToSamples();
+    mathChannel->calculate( result );
+    {
+        QWriteLocker resultLocker( &result.lock );
+        if ( !result.freeRunning ) {
+            triggering->searchTriggeredPosition( result );
+            result.liveTrigger = result.triggeredPosition != 0;
+        } else {
+            result.liveTrigger = false;
+            result.triggeredPosition = 0;
+        }
+    }
+    emit samplesAvailable( &result );
+    // ... and restore the live state
+    QWriteLocker rawLocker( &raw.lock );
+    raw.channels = backup.channels;
+    raw.samplerate = backup.samplerate;
+    raw.oversampling = backup.oversampling;
+    std::copy( backup.gainValue, backup.gainValue + 2, raw.gainValue );
+    std::copy( backup.gainIndex, backup.gainIndex + 2, raw.gainIndex );
+    raw.tag = backup.tag;
+    raw.freeRun = backup.freeRun;
+    raw.valid = backup.valid;
+    raw.rollMode = backup.rollMode;
+    raw.size = backup.size;
+    raw.received = backup.received;
+    raw.data.swap( backup.data );
 }
 
 

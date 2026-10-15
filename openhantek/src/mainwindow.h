@@ -21,6 +21,8 @@ class TriggerDock;
 class SpectrumDock;
 class VoltageDock;
 class QAction;
+class QSlider;
+class QLabel;
 
 namespace Ui {
 class MainWindow;
@@ -48,6 +50,12 @@ class MainWindow : public QMainWindow {
     void closeEvent( QCloseEvent *event ) override;
 
   private:
+    // Slider to browse the raw frame history (kept by HantekDsoControl) while sampling is stopped
+    HantekDsoControl *historySource = nullptr;
+    QSlider *historySlider = nullptr;
+    QLabel *historyLabel = nullptr;
+    void updateHistoryControls( bool samplingActive );
+
     Ui::MainWindow *ui;
     QIcon iconPause;
     QIcon iconPlay;

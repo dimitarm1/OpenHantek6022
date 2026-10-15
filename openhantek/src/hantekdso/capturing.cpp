@@ -62,6 +62,8 @@ void CapturingThread::xferSamples() {
     hdc->raw.freeRun = freeRun;
     hdc->raw.valid = valid;
     hdc->raw.tag = tag;
+    if ( valid && !freeRun )
+        hdc->recordRawFrame();
 }
 
 
