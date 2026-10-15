@@ -60,6 +60,7 @@ DsoWidget::DsoWidget( DsoSettingsScope *scope, DsoSettingsView *view, const Dso:
     // do cursor measurement when right button pressed/moved _inside_ window borders
     connect( mainScope, &GlScope::viewDragged, this, &DsoWidget::viewDragged );
     connect( mainScope, &GlScope::viewDragFinished, this, &DsoWidget::viewDragFinished );
+    connect( mainScope, &GlScope::timebaseWheel, this, &DsoWidget::timebaseWheel );
     connect( mainScope, &GlScope::cursorMeasurement, this, [ this ]( QPointF mPos, QPoint gPos, bool status ) {
         cursorMeasurementPosition = mPos;
         cursorGlobalPosition = gPos;

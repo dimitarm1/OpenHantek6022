@@ -42,7 +42,8 @@ HorizontalDock::HorizontalDock( DsoSettingsScope *scope, const Dso::ControlSpeci
     samplerateSiSpinBox->setMaximum( 1e8 );
     samplerateSiSpinBox->setUnitPostfix( tr( "/s" ) );
 
-    timebaseSteps << 1.0 << 2.0 << 5.0 << 10.0;
+    // finer than 1-2-5: ten steps per decade
+    timebaseSteps << 1.0 << 1.2 << 1.5 << 2.0 << 2.5 << 3.0 << 4.0 << 5.0 << 6.0 << 8.0 << 10.0;
 
     timebaseLabel = new QLabel( tr( "Timebase" ) );
     timebaseSiSpinBox = new SiSpinBox( UNIT_SECONDS );
@@ -138,6 +139,9 @@ double HorizontalDock::setSamplerate( double samplerate ) {
     samplerateSiSpinBox->setValue( samplerate );
     return samplerateSiSpinBox->value();
 }
+
+
+void HorizontalDock::stepTimebase( int steps ) { timebaseSiSpinBox->stepBy( steps ); }
 
 
 double HorizontalDock::setTimebase( double timebase ) {

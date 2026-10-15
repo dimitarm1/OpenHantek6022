@@ -414,6 +414,18 @@ MainWindow::MainWindow( HantekDsoControl *dsoControl, DsoSettings *settings, Exp
         if ( fabs( historyTargetAge - historyAge ) > 0.6 * DIVS_TIME * timebase && historyRenderTimer.elapsed() > 150 )
             requestHistoryAge( historyTargetAge );
     } );
+    // Alt + wheel: change the timebase, in the history view the mouse position becomes the center of the screen
+    connect( dsoWidget, &DsoWidget::timebaseWheel, this, [ this, horizontalDock ]( int steps, double mouseFraction ) {
+        const bool history = historySlider->isVisible();
+        const double oldScreen = DIVS_TIME * dsoSettings->scope.horizontal.timebase;
+        const double pointAge = ( std::isnan( historyTargetAge ) ? historyAge : historyTargetAge ) + ( 1.0 - mouseFraction ) * oldScreen;
+        horizontalDock->stepTimebase( steps );
+        if ( history ) {
+            historyTargetAge = std::nan( "" );
+            dsoWidget->setViewTargetAge( historyTargetAge );
+            requestHistoryAge( pointAge - 0.5 * DIVS_TIME * dsoSettings->scope.horizontal.timebase );
+        }
+    } );
     connect( dsoWidget, &DsoWidget::viewDragFinished, this, [ this ]() {
         historyDragging = false;
         if ( !std::isnan( historyTargetAge ) )

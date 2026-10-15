@@ -40,6 +40,8 @@ class HorizontalDock : public QDockWidget {
     /// \brief Changes the timebase.
     /// \param timebase The timebase in seconds.
     double setTimebase( double timebase );
+    /// \brief Step the timebase selector (negative: faster timebase = zoom in)
+    void stepTimebase( int steps );
     /// \brief Changes the record length if the new value is supported.
     /// \param recordLength The record length in samples.
     void setRecordLength( int recordLength );

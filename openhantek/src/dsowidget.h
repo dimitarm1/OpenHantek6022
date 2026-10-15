@@ -179,4 +179,5 @@ class DsoWidget : public QWidget {
     void triggerLevelChanged( ChannelID channel, double value );  ///< A trigger level has been changed
     void viewDragged( double divisions );                         ///< The scope was dragged with the middle mouse button
     void viewDragFinished();
+    void timebaseWheel( int steps, double mouseFraction );
 };

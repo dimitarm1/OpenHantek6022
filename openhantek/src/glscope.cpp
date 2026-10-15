@@ -300,6 +300,13 @@ void GlScope::wheelEvent( QWheelEvent *event ) {
     if ( scope->verboseLevel > 3 )
         qDebug() << "   GLS::wE()" << event;
     // qDebug() << "wheeelEvent" << zoomed << selectedCursor << event->globalPosition();
+    if ( ( event->modifiers() & Qt::ALT ) && !zoomed ) { // Alt + wheel: change timebase
+        int delta = event->angleDelta().y() ? event->angleDelta().y() : event->angleDelta().x(); // Alt can swap the axes
+        if ( delta && width() > 0 )
+            emit timebaseWheel( delta > 0 ? -1 : 1, std::max( 0.0, std::min( 1.0, event->position().x() / width() ) ) );
+        event->accept();
+        return;
+    }
     if ( selectedMarker == NO_MARKER ) {
         double step = event->angleDelta().y() / 1200.0; // one click = 0.1
         double &m1 = cursorInfo[ size_t( selectedCursor ) ]->pos[ 0 ].rx();

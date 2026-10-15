@@ -98,6 +98,8 @@ class GlScope : public QOpenGLWidget {
     void markerMoved( int cursorIndex, int marker );
     void viewDragged( double divisions ); ///< middle mouse drag: horizontal movement in screen divisions
     void viewDragFinished();
+    /// Alt + wheel: change the timebase by \p steps (negative = zoom in) around horizontal mouse position (0 = left edge, 1 = right edge)
+    void timebaseWheel( int steps, double mouseFraction );
     void cursorMeasurement( QPointF measurePosition = QPointF(), QPoint globalPosition = QPoint(), bool status = false );
 
   private:
