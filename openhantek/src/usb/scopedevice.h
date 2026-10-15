@@ -6,6 +6,11 @@
 #include <QObject>
 #include <QReadWriteLock>
 #include <QStringList>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #ifdef Q_OS_FREEBSD
 #include <libusb.h>
@@ -103,6 +108,21 @@ class ScopeDevice : public QObject {
     /// \return Number of received bytes on success, libusb error code on error.
     int bulkReadMulti( unsigned char *data, unsigned length, bool captureSmallBlocks, unsigned &received,
                        int attempts = HANTEK_ATTEMPTS_MULTI );
+
+    /// The libusb context is needed to run the event loop of the continuous (asynchronous) stream reader.
+    void setUsbContext( libusb_context *context ) { usbContext = context; }
+
+    /// \brief Start continuous reading from the bulk IN endpoint: several transfers are always pending
+    /// and the data is collected in a ring buffer, so the scope's FIFO never stalls between two blocks.
+    /// \param chunkBytes Size of each single transfer (rounded to a multiple of 512).
+    /// \return true if the stream is running.
+    bool startStream( unsigned chunkBytes );
+    /// \brief Stop the stream and discard the buffered data.
+    void stopStream();
+    bool isStreaming() const { return streamOutstanding > 0; }
+    /// \brief Get exactly \p length bytes from the stream, wait for them if necessary.
+    /// \return Number of bytes copied (less than length on timeout / stop / error), or a libusb error code if nothing was received.
+    int readStream( unsigned char *data, unsigned length, int timeoutMs );
 
     /// \brief Control transfer to the oscilloscope.
     /// \param type The request type, also sets the direction of the transfer.
@@ -207,6 +227,23 @@ class ScopeDevice : public QObject {
     template < class T > inline int bulkRead( const T *command, int attempts = HANTEK_ATTEMPTS ) {
         return bulkTransfer( HANTEK_EP_IN, command->data(), command->size(), attempts );
     }
+
+    // continuous stream reader
+    libusb_context *usbContext = nullptr;
+    std::mutex streamControlMutex; ///< serialize start / stop
+    std::mutex streamMutex;        ///< protects the ring buffer
+    std::condition_variable streamCond;
+    std::vector< libusb_transfer * > streamTransfers;
+    std::vector< std::vector< unsigned char > > streamBuffers;
+    std::thread streamThread;
+    std::atomic< int > streamOutstanding{ 0 };
+    std::atomic< bool > streamStopping{ false };
+    std::vector< unsigned char > ring; ///< circular buffer
+    size_t ringHead = 0, ringSize = 0;
+    int streamError = 0;
+    bool ringOverflow = false;
+    void streamAppend( const unsigned char *data, size_t length );
+    static void LIBUSB_CALL streamCallback( libusb_transfer *transfer );
 
     bool realHW = true;
     bool stopTransfer = false;

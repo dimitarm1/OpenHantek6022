@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QList>
+#include <algorithm>
+#include <chrono>
 #include <iostream>
 
 #include "scopedevice.h"
@@ -150,6 +152,7 @@ int ScopeDevice::claimInterface( const libusb_interface_descriptor *interfaceDes
 
 void ScopeDevice::disconnectFromDevice( bool expected ) {
     expectedDisconnect |= expected;
+    stopStream(); // before the handle is closed
     if ( disconnected && !handle )
         return;
 
@@ -198,6 +201,151 @@ int ScopeDevice::bulkTransfer( unsigned char endpoint, const unsigned char *data
         return errorCode;
     else
         return transferred;
+}
+
+
+static const size_t STREAM_RING_BYTES = size_t( 16 ) << 20;
+static const int STREAM_TRANSFERS = 16;
+
+
+bool ScopeDevice::startStream( unsigned chunkBytes ) {
+    stopStream();
+    std::lock_guard< std::mutex > control( streamControlMutex );
+    if ( !handle || !usbContext || disconnected )
+        return false;
+    chunkBytes = std::max( 1024u, std::min( chunkBytes, 256u * 1024 ) ) / 512 * 512;
+    {
+        std::lock_guard< std::mutex > lock( streamMutex );
+        ring.assign( STREAM_RING_BYTES, 0 );
+        ringHead = ringSize = 0;
+        streamError = 0;
+        ringOverflow = false;
+    }
+    streamStopping = false;
+    streamBuffers.assign( STREAM_TRANSFERS, std::vector< unsigned char >( chunkBytes ) );
+    streamTransfers.assign( STREAM_TRANSFERS, nullptr );
+    int submitted = 0;
+    for ( int iii = 0; iii < STREAM_TRANSFERS; ++iii ) {
+        libusb_transfer *t = libusb_alloc_transfer( 0 );
+        if ( !t )
+            break;
+        libusb_fill_bulk_transfer( t, handle, HANTEK_EP_IN, streamBuffers[ size_t( iii ) ].data(), int( chunkBytes ), streamCallback,
+                                   this, 0 ); // no timeout
+        streamTransfers[ size_t( iii ) ] = t;
+        streamOutstanding = submitted + 1; // count before submit, the callback may run immediately
+        if ( libusb_submit_transfer( t ) != 0 ) {
+            streamOutstanding = submitted;
+            libusb_free_transfer( t );
+            streamTransfers[ size_t( iii ) ] = nullptr;
+            break;
+        }
+        ++submitted;
+    }
+    if ( submitted == 0 )
+        return false;
+    streamThread = std::thread( [ this ]() {
+        struct timeval tv = { 0, 100000 };
+        while ( streamOutstanding > 0 )
+            libusb_handle_events_timeout_completed( usbContext, &tv, nullptr );
+    } );
+    return true;
+}
+
+
+void ScopeDevice::stopStream() {
+    std::lock_guard< std::mutex > control( streamControlMutex );
+    if ( !streamThread.joinable() )
+        return;
+    streamStopping = true;
+    for ( libusb_transfer *t : streamTransfers )
+        if ( t )
+            libusb_cancel_transfer( t ); // callbacks (event thread) will not resubmit
+    streamThread.join();
+    for ( libusb_transfer *t : streamTransfers )
+        if ( t )
+            libusb_free_transfer( t );
+    streamTransfers.clear();
+    streamBuffers.clear();
+    {
+        std::lock_guard< std::mutex > lock( streamMutex );
+        ringHead = ringSize = 0;
+    }
+    streamCond.notify_all();
+}
+
+
+void ScopeDevice::streamAppend( const unsigned char *data, size_t length ) { // streamMutex is held
+    const size_t cap = ring.size();
+    if ( length > cap ) {
+        data += length - cap;
+        length = cap;
+        ringOverflow = true;
+    }
+    if ( ringSize + length > cap ) { // consumer too slow: drop oldest data
+        size_t drop = ringSize + length - cap;
+        ringHead = ( ringHead + drop ) % cap;
+        ringSize -= drop;
+        ringOverflow = true;
+    }
+    size_t tail = ( ringHead + ringSize ) % cap;
+    size_t first = std::min( length, cap - tail );
+    std::copy( data, data + first, ring.begin() + long( tail ) );
+    std::copy( data + first, data + length, ring.begin() );
+    ringSize += length;
+}
+
+
+void LIBUSB_CALL ScopeDevice::streamCallback( libusb_transfer *transfer ) {
+    ScopeDevice *self = static_cast< ScopeDevice * >( transfer->user_data );
+    bool resubmit = !self->streamStopping;
+    {
+        std::lock_guard< std::mutex > lock( self->streamMutex );
+        if ( transfer->actual_length > 0 )
+            self->streamAppend( transfer->buffer, size_t( transfer->actual_length ) );
+        switch ( transfer->status ) {
+        case LIBUSB_TRANSFER_COMPLETED:
+        case LIBUSB_TRANSFER_TIMED_OUT:
+            break;
+        case LIBUSB_TRANSFER_CANCELLED:
+            resubmit = false;
+            break;
+        case LIBUSB_TRANSFER_NO_DEVICE:
+            self->streamError = LIBUSB_ERROR_NO_DEVICE;
+            resubmit = false;
+            break;
+        default:
+            self->streamError = LIBUSB_ERROR_IO;
+            resubmit = false;
+            break;
+        }
+    }
+    if ( resubmit && libusb_submit_transfer( transfer ) == 0 ) {
+        self->streamCond.notify_all();
+        return;
+    }
+    --self->streamOutstanding;
+    self->streamCond.notify_all();
+}
+
+
+int ScopeDevice::readStream( unsigned char *data, unsigned length, int timeoutMs ) {
+    std::unique_lock< std::mutex > lock( streamMutex );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( timeoutMs );
+    while ( ringSize < length && !streamError && streamOutstanding > 0 ) {
+        if ( hasStopped() || std::chrono::steady_clock::now() >= deadline )
+            break;
+        streamCond.wait_for( lock, std::chrono::milliseconds( 50 ) );
+    }
+    const size_t n = std::min< size_t >( length, ringSize );
+    if ( n == 0 && streamError )
+        return streamError;
+    const size_t cap = ring.size();
+    const size_t first = std::min( n, cap - ringHead );
+    std::copy( ring.begin() + long( ringHead ), ring.begin() + long( ringHead + first ), data );
+    std::copy( ring.begin(), ring.begin() + long( n - first ), data + first );
+    ringHead = ( ringHead + n ) % cap;
+    ringSize -= n;
+    return int( n );
 }
 
 

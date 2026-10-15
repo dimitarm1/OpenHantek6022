@@ -16,6 +16,8 @@ class CapturingThread : public QThread {
     void capture();
     unsigned getRealSamples( ScopeDevice *device );
     unsigned getDemoSamples();
+    unsigned getStreamSamples( ScopeDevice *device );
+    void stopStreamIfRunning();
     void xferSamples();
     HantekDsoControl *hdc;
     unsigned channels = 0;
@@ -30,6 +32,8 @@ class CapturingThread : public QThread {
     unsigned tag = 0;
     bool valid = true;
     bool freeRun = false;
+    bool blockContinued = false; ///< this block directly continues the previous one
     std::vector< unsigned char > data;
     std::vector< unsigned char > *dp = &data;
+    std::vector< unsigned char > carry; ///< tail of the previous block, overlaps the skipped lead-in of the next block
 };

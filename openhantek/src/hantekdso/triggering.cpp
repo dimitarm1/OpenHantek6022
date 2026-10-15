@@ -31,7 +31,8 @@ int Triggering::searchTriggerPoint( DSOsamples &result, Dso::Slope dsoSlope, int
     double triggerLevel = controlsettings.trigger.level[ channel ];
     if ( scope->verboseLevel > 5 )
         qDebug() << "     Triggering::searchTriggerPoint()" << channel << triggerLevel << slope << startPos;
-    int samplesDisplay = int( round( controlsettings.samplerate.target.duration * controlsettings.samplerate.current ) );
+    // use the rate of the data, it can differ from the current setting (history replay)
+    int samplesDisplay = int( round( controlsettings.samplerate.target.duration * result.samplerate ) );
     int searchBegin;
     int searchEnd;
     if ( 0 == startPos ) {                                                      // search 1st trigger slope
@@ -121,7 +122,7 @@ int Triggering::searchTriggeredPosition( DSOsamples &result ) {
     size_t sampleCount = result.data[ channel ].size();              // number of available samples
     double timeDisplay = controlsettings.samplerate.target.duration; // time for full screen width
     double sampleRate = result.samplerate;                           //
-    unsigned samplesDisplay = unsigned( round( timeDisplay * controlsettings.samplerate.current ) );
+    unsigned samplesDisplay = unsigned( round( timeDisplay * sampleRate ) );
     if ( sampleCount < samplesDisplay ) // not enough samples to adjust for jitter.
         return result.triggeredPosition = 0;
     // search for trigger point in a range that leaves enough samples left and right of trigger for display

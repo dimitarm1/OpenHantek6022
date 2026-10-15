@@ -194,6 +194,7 @@ Dso::ErrorCode HantekDsoControl::setRecordTime( double duration ) {
     if ( verboseLevel > 2 )
         qDebug() << "  HDC::setRecordTime() emit samplerateChanged" << samplerate << oversampling;
     emit samplerateCalculated( samplerate, oversampling );
+    requestRefresh(); // redraw the history window if stopped
     return Dso::ErrorCode::NONE;
 }
 
@@ -829,13 +830,15 @@ static uint8_t offsetToFine( double offset ) {
 void HantekDsoControl::convertRawDataToSamples() {
     QReadLocker rawLocker( &raw.lock );
     activeChannels = raw.channels;
-    const unsigned rawSampleCount = unsigned( raw.data.size() ) / activeChannels;
+    const bool summed = !raw.sums.empty(); // history replay: oversampling groups are already summed
+    const unsigned rawSampleCount = unsigned( summed ? raw.sums.size() : raw.data.size() ) / activeChannels;
     if ( !rawSampleCount )
         return;
-    const unsigned rawOversampling = raw.oversampling;
+    const unsigned rawOversampling = summed ? 1 : raw.oversampling;
     const bool freeRunning = rawSampleCount / rawOversampling < SAMPLESIZE; // amount needed for sw trigger
-    const unsigned sampleCount = freeRunning ? rawSampleCount : netSampleCount( rawSampleCount );
-    const unsigned resultSamples = freeRunning ? sampleCount / rawOversampling - 1 : sampleCount / rawOversampling;
+    const unsigned sampleCount = ( freeRunning || summed ) ? rawSampleCount : netSampleCount( rawSampleCount );
+    const unsigned resultSamples =
+        summed ? sampleCount : ( freeRunning ? sampleCount / rawOversampling - 1 : sampleCount / rawOversampling );
     const unsigned skipSamples = rawSampleCount - sampleCount;
     if ( verboseLevel > 4 )
         qDebug() << "    HDC::convertRawDataToSamples()" << raw.tag;
@@ -878,6 +881,8 @@ void HantekDsoControl::convertRawDataToSamples() {
         result.data[ channel ].resize( resultSamples );
         rawBufPos += skipSamples * activeChannels; // skip first unstable samples
         result.clipped &= ~( 0x01 << channel );    // clear clipping flag
+        if ( summed )
+            result.clipped |= raw.clippedMask & ( 0x01 << channel );
 
         double gainCorr = gainCorrection[ gainIndex ][ channel ];
         double offsetCorr = offsetCorrection[ gainIndex ][ channel ];
@@ -891,17 +896,21 @@ void HantekDsoControl::convertRawDataToSamples() {
             if ( rawBufPos + rawOversampling * activeChannels > rawSampleCount * activeChannels )
                 rawBufPos = 0; // (roll mode) show "new" samples after the "old" samples
             double sample = 0.0;
-            for ( unsigned iii = 0; iii < rawOversampling * activeChannels; iii += activeChannels ) {
-                int rawSample = raw.data[ rawBufPos + channel + iii ]; // CH1/CH2/CH1/CH2 ...
-                if ( rawSample == 0x00 || rawSample == 0xFF )          // min or max -> clipped
-                    result.clipped |= 0x01 << channel;
-                if ( rawSample > maxValue )
-                    maxValue = rawSample;
-                if ( rawSample < minValue )
-                    minValue = rawSample;
-                sample += double( rawSample ) - offsetCalibration;
+            if ( summed ) {
+                sample = double( raw.sums[ rawBufPos + channel ] ) / raw.oversampling - offsetCalibration;
+            } else {
+                for ( unsigned iii = 0; iii < rawOversampling * activeChannels; iii += activeChannels ) {
+                    int rawSample = raw.data[ rawBufPos + channel + iii ]; // CH1/CH2/CH1/CH2 ...
+                    if ( rawSample == 0x00 || rawSample == 0xFF )          // min or max -> clipped
+                        result.clipped |= 0x01 << channel;
+                    if ( rawSample > maxValue )
+                        maxValue = rawSample;
+                    if ( rawSample < minValue )
+                        minValue = rawSample;
+                    sample += double( rawSample ) - offsetCalibration;
+                }
+                sample /= rawOversampling;
             }
-            sample /= rawOversampling;
             if ( scope->liveCalibrationActive ) {
                 liveOffset += sample;
             }
@@ -965,15 +974,25 @@ void HantekDsoControl::clearHistory() {
     QMutexLocker locker( &historyMutex );
     history.clear();
     historyBytes = 0;
+    replayIndex = -1;
 }
 
 
 /// Called with the freshly received raw frame, no other thread writes \c raw meanwhile.
+/// Only the part that is displayed by convertRawDataToSamples() is kept, and the oversampling groups are summed up.
 void HantekDsoControl::recordRawFrame() {
     if ( !historyClock.isValid() )
         historyClock.start();
+    if ( raw.channels == 0 || raw.oversampling == 0 )
+        return;
+    const unsigned channels = raw.channels;
+    const unsigned rawSampleCount = unsigned( raw.data.size() ) / channels;
+    if ( rawSampleCount / raw.oversampling < unsigned( SAMPLESIZE ) )
+        return; // too short for a triggered display, not recorded
+    const unsigned skip = rawSampleCount - netSampleCount( rawSampleCount );
+    const unsigned groups = netSampleCount( rawSampleCount ) / raw.oversampling;
     auto frame = std::make_shared< RawFrame >();
-    frame->channels = raw.channels;
+    frame->channels = channels;
     frame->samplerate = raw.samplerate;
     frame->oversampling = raw.oversampling;
     frame->gainValue[ 0 ] = raw.gainValue[ 0 ];
@@ -983,16 +1002,33 @@ void HantekDsoControl::recordRawFrame() {
     frame->tag = raw.tag;
     frame->freeRun = raw.freeRun;
     frame->rollMode = raw.rollMode;
-    frame->size = raw.size;
-    frame->received = raw.received;
-    frame->data = raw.data;
+    frame->continued = raw.continued;
+    frame->sums.resize( size_t( groups ) * channels );
+    const unsigned char *src = raw.data.data() + size_t( skip ) * channels;
+    uint16_t *dst = frame->sums.data();
+    unsigned char clipped = 0;
+    for ( unsigned group = 0; group < groups; ++group ) {
+        for ( unsigned ch = 0; ch < channels; ++ch ) {
+            unsigned sum = 0;
+            for ( unsigned iii = 0; iii < raw.oversampling; ++iii ) {
+                const unsigned char v = src[ size_t( iii ) * channels + ch ];
+                sum += v;
+                if ( v == 0x00 || v == 0xFF )
+                    clipped |= 0x01 << ch;
+            }
+            *dst++ = uint16_t( sum );
+        }
+        src += size_t( raw.oversampling ) * channels;
+    }
+    frame->clippedMask = clipped;
     frame->timeMs = historyClock.elapsed();
+    const size_t bytes = frame->sums.size() * sizeof( uint16_t ) + sizeof( RawFrame );
     QMutexLocker locker( &historyMutex );
-    historyBytes += frame->data.size() + sizeof( RawFrame );
+    historyBytes += bytes;
     history.push_back( frame );
     while ( history.size() > 1 &&
             ( frame->timeMs - history.front()->timeMs > HISTORY_MAX_AGE_MS || historyBytes > HISTORY_MAX_BYTES ) ) {
-        historyBytes -= history.front()->data.size() + sizeof( RawFrame );
+        historyBytes -= history.front()->sums.size() * sizeof( uint16_t ) + sizeof( RawFrame );
         history.pop_front();
     }
 }
@@ -1015,14 +1051,39 @@ qint64 HantekDsoControl::historyAgeMs( int index ) const {
 void HantekDsoControl::showHistoryFrame( int index ) {
     if ( samplingUI || scope->liveCalibrationActive )
         return; // only while stopped
+    // Build a window that ends with history frame \p index and is long enough for the current timebase:
+    // walk back over directly consecutive frames of the gapless stream and join them.
     std::shared_ptr< RawFrame > frame;
+    std::vector< std::shared_ptr< RawFrame > > chain; // newest first
     {
         QMutexLocker locker( &historyMutex );
         if ( index < 0 || size_t( index ) >= history.size() )
             return;
+        replayIndex = index;
         frame = history[ size_t( index ) ];
+        // samples per channel needed: twice the screen width for trigger search, but at least like a live block
+        const double duration = controlsettings.samplerate.target.duration;
+        const double effectiveRate = frame->samplerate / frame->oversampling;
+        const size_t need = size_t( std::min( std::max( 2.0 * duration * effectiveRate + 200, double( SAMPLESIZE + 500 ) ), 16e6 ) );
+        chain.push_back( frame );
+        size_t have = frame->sums.size() / frame->channels;
+        for ( int idx = index; have < need && idx > 0 && history[ size_t( idx ) ]->continued; --idx ) {
+            const auto &prev = history[ size_t( idx - 1 ) ];
+            if ( prev->channels != frame->channels || prev->samplerate != frame->samplerate ||
+                 prev->oversampling != frame->oversampling || prev->gainIndex[ 0 ] != frame->gainIndex[ 0 ] ||
+                 prev->gainIndex[ 1 ] != frame->gainIndex[ 1 ] )
+                break;
+            chain.push_back( prev );
+            have += prev->sums.size() / prev->channels;
+        }
     }
-    // temporarily load the stored frame into raw ...
+    std::vector< uint16_t > joined;
+    unsigned char clippedMask = 0;
+    for ( size_t iii = chain.size(); iii-- > 0; ) { // oldest first
+        joined.insert( joined.end(), chain[ iii ]->sums.begin(), chain[ iii ]->sums.end() );
+        clippedMask |= chain[ iii ]->clippedMask;
+    }
+    // temporarily load it into raw ...
     Raw backup;
     {
         QWriteLocker rawLocker( &raw.lock );
@@ -1038,6 +1099,8 @@ void HantekDsoControl::showHistoryFrame( int index ) {
         backup.size = raw.size;
         backup.received = raw.received;
         backup.data.swap( raw.data );
+        backup.sums.swap( raw.sums );
+        backup.clippedMask = raw.clippedMask;
         raw.channels = frame->channels;
         raw.samplerate = frame->samplerate;
         raw.oversampling = frame->oversampling;
@@ -1048,7 +1111,8 @@ void HantekDsoControl::showHistoryFrame( int index ) {
         raw.rollMode = frame->rollMode;
         raw.size = frame->size;
         raw.received = frame->received;
-        raw.data = frame->data;
+        raw.sums.swap( joined );
+        raw.clippedMask = clippedMask;
     }
     // ... run the same processing chain as for live data ...
     convertRawDataToSamples();
@@ -1078,6 +1142,8 @@ void HantekDsoControl::showHistoryFrame( int index ) {
     raw.size = backup.size;
     raw.received = backup.received;
     raw.data.swap( backup.data );
+    raw.sums.swap( backup.sums );
+    raw.clippedMask = backup.clippedMask;
 }
 
 
@@ -1091,7 +1157,10 @@ void HantekDsoControl::stateMachine() {
     // we have a sample available ...
     // ... that is either a new sample or we are in free run mode or a new trigger search is needed
     static unsigned lastTag = UINT32_MAX; // detect new raw data
-    if ( samplingStarted && raw.valid && ( raw.tag != lastTag || raw.freeRun || refreshNeeded() ) ) {
+    if ( !samplingUI && replayIndex >= 0 ) { // stopped and browsing the history: settings changes redraw the history window
+        if ( refreshNeeded() )
+            showHistoryFrame( replayIndex );
+    } else if ( samplingStarted && raw.valid && ( raw.tag != lastTag || raw.freeRun || refreshNeeded() ) ) {
         lastTag = raw.tag;
         convertRawDataToSamples(); // process samples, apply gain settings etc.
         mathChannel->calculate( result );

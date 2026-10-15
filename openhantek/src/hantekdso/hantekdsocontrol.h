@@ -46,9 +46,12 @@ struct Raw {
     bool freeRun = false;  // small buffer, no trigger
     bool valid = false;    // samples can be processed
     bool rollMode = false; // one complete buffer received, start to roll
+    bool continued = false; // block directly continues the previous block (gapless stream)
     unsigned size = 0;
     unsigned received = 0;
     std::vector< unsigned char > data;
+    std::vector< uint16_t > sums;   ///< history replay: sums of \c oversampling raw samples (replaces \c data)
+    unsigned char clippedMask = 0;  ///< history replay: clipped channels
     mutable QReadWriteLock lock;
 };
 
@@ -63,10 +66,13 @@ struct RawFrame {
     unsigned tag = 0;
     bool freeRun = false;
     bool rollMode = false;
+    bool continued = false; ///< directly continues the previous frame (no gap)
     unsigned size = 0;
     unsigned received = 0;
     qint64 timeMs = 0; ///< capture time stamp
-    std::vector< unsigned char > data;
+    unsigned char clippedMask = 0;
+    /// The displayed part of the block, already summed over \c oversampling raw samples (channels interleaved)
+    std::vector< uint16_t > sums;
 };
 
 
@@ -233,6 +239,7 @@ class HantekDsoControl : public QObject {
     size_t historyBytes = 0;
     mutable QMutex historyMutex;
     QElapsedTimer historyClock;
+    int replayIndex = -1; ///< history frame shown while stopped, -1 = none
     void clearHistory();
     unsigned debugLevel = 0;
     uint8_t channelOffset[ 2 ] = { 0x80, 0x80 };

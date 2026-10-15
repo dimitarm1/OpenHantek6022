@@ -68,6 +68,7 @@ int FindDevices::updateDeviceList() {
                 if ( verboseLevel > 2 )
                     qDebug() << "  +++" << QString( "0x%1" ).arg( USBid, 8, 16, QChar( '0' ) ) << model->name;
                 devices[ USBid ] = std::unique_ptr< ScopeDevice >( new ScopeDevice( model, device, findIteration, verboseLevel ) );
+                devices[ USBid ]->setUsbContext( context );
                 break; // stop after 1st supported model (there can be more models with identical VID/PID)
             }
         }

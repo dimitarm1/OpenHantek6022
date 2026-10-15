@@ -8,6 +8,11 @@
 #include <cmath>
 
 
+/// Up to this hardware samplerate the scope is read as one gapless stream (see getStreamSamples()).
+/// Low effective rates use a high hardware rate with oversampling (e.g. 10 MS/s for 1 MS/s), 16 MS/s is tested.
+static const double STREAM_MAX_SAMPLERATE = 16e6;
+
+
 CapturingThread::CapturingThread( HantekDsoControl *hdc ) : hdc( hdc ) {
     if ( hdc->verboseLevel > 1 ) {
         qDebug() << " CapturingThread::CapturingThread()";
@@ -21,6 +26,7 @@ CapturingThread::CapturingThread( HantekDsoControl *hdc ) : hdc( hdc ) {
 void CapturingThread::run() {
     forever {
         if ( !hdc->capturing || QThread::currentThread()->isInterruptionRequested() ) {
+            stopStreamIfRunning();
             hdc->quitSampling();     // stop the scope
             hdc->stopStateMachine(); // stop the state machine
             return;                  // stop this thread
@@ -31,6 +37,7 @@ void CapturingThread::run() {
                 // add user defined hold-off time to lower CPU load
                 QThread::msleep( unsigned( 1000 * hdc->scope->horizontal.acquireInterval ) );
             } else {
+                stopStreamIfRunning();
                 QThread::msleep( unsigned( hdc->displayInterval ) ); // run slowly
             }
         }
@@ -62,6 +69,7 @@ void CapturingThread::xferSamples() {
     hdc->raw.freeRun = freeRun;
     hdc->raw.valid = valid;
     hdc->raw.tag = tag;
+    hdc->raw.continued = blockContinued;
     if ( valid && !freeRun )
         hdc->recordRawFrame();
 }
@@ -76,6 +84,15 @@ void CapturingThread::capture() {
         return;
 
     int errorCode;
+    // Changed settings interrupt the continuous stream, it is restarted below
+    if ( device->isStreaming() ) {
+        for ( ControlCommand *cc = hdc->firstControlCommand; cc; cc = cc->next ) {
+            if ( cc->pending ) {
+                device->stopStream();
+                break;
+            }
+        }
+    }
     // Send all pending control commands
     ControlCommand *controlCommand = hdc->firstControlCommand;
     while ( controlCommand ) {
@@ -157,8 +174,15 @@ void CapturingThread::capture() {
         xferSamples();
     if ( 0 == ++tag )
         ++tag; // skip tag==0
+    blockContinued = false;
     if ( device->isRealHW() ) {
-        received = getRealSamples( device );
+        if ( !realSlow && !freeRun && samplerate <= STREAM_MAX_SAMPLERATE )
+            received = getStreamSamples( device );
+        else {
+            if ( device->isStreaming() )
+                device->stopStream();
+            received = getRealSamples( device );
+        }
     } else {
         received = getDemoSamples();
     }
@@ -176,6 +200,53 @@ void CapturingThread::capture() {
     }
     if ( !freeRun ) // in normal capturing mode transfer after capturing one block
         xferSamples();
+}
+
+
+void CapturingThread::stopStreamIfRunning() {
+    QReadLocker deviceLocker( &hdc->scopeDeviceLock );
+    if ( hdc->scopeDevice && hdc->scopeDevice->isStreaming() )
+        hdc->scopeDevice->stopStream();
+    carry.clear();
+}
+
+
+/// Read the next block from the continuous stream instead of re-arming the scope for every block.
+/// The first samples of each block are skipped by the display (unstable start after re-arming),
+/// so each new block begins with a copy of the end of the previous block. Consecutive displayed blocks
+/// then follow each other without any hole in time.
+unsigned CapturingThread::getStreamSamples( ScopeDevice *device ) {
+    const unsigned samplesPerChannel = rawSamplesize / channels;
+    const unsigned skipBytes = ( samplesPerChannel - hdc->netSampleCount( samplesPerChannel ) ) * channels;
+    if ( !device->isStreaming() ) {
+        // transfers of about 10 ms length
+        const unsigned chunk = unsigned( samplerate * channels / 100 );
+        if ( !device->startStream( chunk ) )
+            return 0;
+        int errorCode = device->controlWrite( hdc->getCommand( Hantek::ControlCode::CONTROL_STARTSAMPLING ) );
+        if ( errorCode < 0 ) {
+            qWarning() << "controlWrite: Starting stream failed: " << libUsbErrorString( errorCode );
+            device->stopStream();
+            return 0;
+        }
+        carry.clear();
+    }
+    unsigned lead = 0;
+    if ( skipBytes && skipBytes < rawSamplesize && carry.size() >= skipBytes ) {
+        lead = skipBytes;
+        std::copy( carry.end() - lead, carry.end(), dp->begin() );
+    }
+    const unsigned wanted = rawSamplesize - lead;
+    int got = device->readStream( dp->data() + lead, wanted, 2000 );
+    if ( got < 0 || unsigned( got ) != wanted ) { // timeout, stop or error: restart the stream with the next block
+        device->stopStream();
+        carry.clear();
+        return got < 0 ? 0 : lead + unsigned( got );
+    }
+    blockContinued = lead > 0;
+    carry.assign( dp->end() - skipBytes, dp->end() );
+    hdc->raw.received = rawSamplesize;
+    return rawSamplesize;
 }
 
 
