@@ -391,6 +391,7 @@ MainWindow::MainWindow( HantekDsoControl *dsoControl, DsoSettings *settings, Exp
     historySlider->setVisible( false );
     historyLabel->setVisible( false );
     connect( historySlider, &QSlider::valueChanged, this, [ this ]( int index ) {
+        historyWantedAge = std::nan( "" );
         historyTargetAge = std::nan( "" );
         dsoWidget->setViewTargetAge( historyTargetAge );
         ++historySerial;
@@ -407,23 +408,31 @@ MainWindow::MainWindow( HantekDsoControl *dsoControl, DsoSettings *settings, Exp
         }
         const double timebase = dsoSettings->scope.horizontal.timebase;
         if ( std::isnan( historyTargetAge ) )
-            historyTargetAge = historyAge;
+            historyTargetAge = std::isnan( historyWantedAge ) ? historyAge : historyWantedAge;
+        historyWantedAge = std::nan( "" );
         historyDragging = true;
         historyTargetAge = std::max( 0.0, std::min( historyTargetAge + divisions * timebase, historySource->historySpanSeconds() ) );
         dsoWidget->setViewTargetAge( historyTargetAge );
         if ( fabs( historyTargetAge - historyAge ) > 0.6 * DIVS_TIME * timebase && historyRenderTimer.elapsed() > 150 )
             requestHistoryAge( historyTargetAge );
     } );
-    // Alt + wheel: change the timebase, in the history view the mouse position becomes the center of the screen
+    // Alt + wheel: change the timebase, in the history view the time under the mouse stays under the mouse
     connect( dsoWidget, &DsoWidget::timebaseWheel, this, [ this, horizontalDock ]( int steps, double mouseFraction ) {
         const bool history = historySlider->isVisible();
         const double oldScreen = DIVS_TIME * dsoSettings->scope.horizontal.timebase;
-        const double pointAge = ( std::isnan( historyTargetAge ) ? historyAge : historyTargetAge ) + ( 1.0 - mouseFraction ) * oldScreen;
+        double rightAge = historyAge; // the wanted position counts, the last wheel step may not be rendered yet
+        if ( !std::isnan( historyWantedAge ) )
+            rightAge = historyWantedAge;
+        else if ( !std::isnan( historyTargetAge ) )
+            rightAge = historyTargetAge;
+        const double pointAge = rightAge + ( 1.0 - mouseFraction ) * oldScreen;
         horizontalDock->stepTimebase( steps );
         if ( history ) {
+            const double newScreen = DIVS_TIME * dsoSettings->scope.horizontal.timebase;
             historyTargetAge = std::nan( "" );
             dsoWidget->setViewTargetAge( historyTargetAge );
-            requestHistoryAge( pointAge - 0.5 * DIVS_TIME * dsoSettings->scope.horizontal.timebase );
+            historyWantedAge = std::max( 0.0, pointAge - ( 1.0 - mouseFraction ) * newScreen );
+            requestHistoryAge( historyWantedAge );
         }
     } );
     connect( dsoWidget, &DsoWidget::viewDragFinished, this, [ this ]() {
@@ -621,6 +630,8 @@ void MainWindow::showNewData( std::shared_ptr< PPresult > newData ) {
         qDebug() << "     MainWindow::showNewData()" << newData->tag;
     dsoWidget->showNew( newData );
     historyRendered = newData->extendedView;
+    if ( newData->viewSerial >= historySerial )
+        historyWantedAge = std::nan( "" );
     if ( !std::isnan( historyTargetAge ) && !historyDragging && newData->viewSerial >= historySerial ) {
         historyTargetAge = std::nan( "" ); // the requested position is rendered, no more panning needed
         dsoWidget->setViewTargetAge( historyTargetAge );

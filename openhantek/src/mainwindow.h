@@ -60,6 +60,7 @@ class MainWindow : public QMainWindow {
     double historyAge = 0;                       ///< age of the right edge of the rendered history screen
     double historyTargetAge = std::nan( "" );    ///< wanted age while dragging (NaN: as rendered)
     bool historyDragging = false;
+    double historyWantedAge = std::nan( "" ); ///< position requested by Alt+wheel, until it is rendered
     bool historyRendered = false;                ///< the display shows data from the history window
     int historySerial = 0;                       ///< number of the last request
     QElapsedTimer historyRenderTimer;
